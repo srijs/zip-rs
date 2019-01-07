@@ -8,6 +8,8 @@ use result::{ZipResult, ZipError};
 use std::io;
 use std::io::prelude::*;
 use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::borrow::Cow;
 
 use buffer::{ByteBuf, StrBuf};
@@ -53,12 +55,12 @@ mod ffi {
 /// println!("Result: {:?}", doit());
 /// ```
 #[derive(Clone, Debug)]
-pub struct ZipArchive<R: Read + io::Seek>
+pub struct ZipArchive<R: Read + io::Seek, S: BuildHasher = RandomState>
 {
     reader: R,
     number_of_files: usize,
     files: Vec<ZipFileData>,
-    names_map: HashMap<StrBuf, usize>,
+    names_map: HashMap<StrBuf, usize, S>,
     offset: u64,
     comment: Vec<u8>,
     central_directory_bytes: ByteBuf,
@@ -119,6 +121,14 @@ fn make_reader<'a>(
 }
 
 impl<R: Read+io::Seek> ZipArchive<R>
+{
+    /// Opens a Zip archive and parses the central directory
+    pub fn new(reader: R) -> ZipResult<ZipArchive<R>> {
+        Self::new_with_hasher(reader, RandomState::new())
+    }
+}
+
+impl<R: Read+io::Seek, S: BuildHasher> ZipArchive<R, S>
 {
     /// Get the directory start offset and number of files. This is done in a
     /// separate function to ease the control flow design.
@@ -198,7 +208,7 @@ impl<R: Read+io::Seek> ZipArchive<R>
     }
 
     /// Opens a Zip archive and parses the central directory
-    pub fn new(mut reader: R) -> ZipResult<ZipArchive<R>> {
+    pub fn new_with_hasher(mut reader: R, hash_builder: S) -> ZipResult<ZipArchive<R, S>> {
         let (footer, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut reader)?;
 
         if footer.disk_number != footer.disk_with_central_directory
@@ -217,7 +227,7 @@ impl<R: Read+io::Seek> ZipArchive<R>
             reader: reader,
             number_of_files: number_of_files,
             files: Vec::with_capacity(number_of_files),
-            names_map: HashMap::with_capacity(number_of_files),
+            names_map: HashMap::with_capacity_and_hasher(number_of_files, hash_builder),
             offset: archive_offset,
             comment: footer.zip_file_comment,
             central_directory_bytes: central_directory_bytes.into(),
@@ -458,10 +468,10 @@ fn get_file_from_data<'a, R>(data: &'a mut ZipFileData, reader: &'a mut R) -> Zi
     Ok(ZipFile { reader: make_reader(data.compression_method, data.crc32, limit_reader)?, data: Cow::Borrowed(data) })
 }
 
-fn read_files_till<'a>(
+fn read_files_till<'a, S: BuildHasher>(
     number_of_files: usize,
     files: &'a mut Vec<ZipFileData>,
-    names_map: &mut HashMap<StrBuf, usize>,
+    names_map: &mut HashMap<StrBuf, usize, S>,
     offset: u64,
     central_directory_bytes: &mut ByteBuf,
     predicate: ReadFilesTillPredicate,
